@@ -220,3 +220,68 @@ with tab2:
                         with open(fname, "r", encoding="utf-8") as f:
                             components.html(f.read(), height=420)
                     st.divider()
+
+# ==========================================
+# 5. 交易模組 (Jupiter Deep Link)
+# ==========================================
+def render_trade_button(token_address):
+    st.markdown("### 🔫 快速狙擊")
+    
+    # 用戶輸入想買多少 SOL
+    amount = st.number_input("買入金額 (SOL)", min_value=0.1, value=0.5, step=0.1)
+    
+    # 這是 Jupiter 的 Deep Link 格式
+    # 點擊後會自動打開 Phantom 並填好單子
+    # inputMint=SOL, outputMint=目標代幣
+    jup_url = f"https://jup.ag/swap/SOL-{token_address}?inAmount={amount}"
+    
+    # 顯示一個漂亮的按鈕
+    st.markdown(f"""
+    <a href="{jup_url}" target="_blank">
+        <button style="
+            background-color: #4CAF50; 
+            border: none;
+            color: white;
+            padding: 15px 32px;
+            text-align: center;
+            text-decoration: none;
+            display: inline-block;
+            font-size: 16px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 12px;
+            width: 100%;">
+            🚀 使用 Jupiter 買入 {amount} SOL
+        </button>
+    </a>
+    <p style="font-size:0.8em; color:gray;">*點擊後將跳轉至 Jupiter/Phantom 進行簽名</p>
+    """, unsafe_allow_html=True)
+
+# --- 在主介面呼叫 ---
+# (請把這行加在你的 analyze_token 成功之後)
+# if G and risk == 0:  <-- 只有安全的時候才顯示買入按鈕
+#     render_trade_button(target)
+def check_rug(token_address):
+    st.write("🛡️ 正在檢查合約安全性 (RugCheck)...")
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{token_address}/report"
+        res = requests.get(url, timeout=5).json()
+        
+        score = res.get('score', 0) # 分數越低越好
+        risks = res.get('risks', [])
+        
+        if score < 1000: # 隨便設個閾值，RugCheck 通常 < 500 比較好
+            st.success(f"✅ 合約評分: {score} (相對安全)")
+        else:
+            st.error(f"❌ 合約高風險！評分: {score}")
+            
+        if risks:
+            with st.expander("⚠️ 查看詳細風險項目"):
+                for r in risks:
+                    st.write(f"- {r.get('name')}: {r.get('description')}")
+                    
+    except:
+        st.warning("RugCheck 暫時無法連線")
+
+# --- 在主介面呼叫 ---
+# check_rug(target)
