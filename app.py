@@ -7,20 +7,21 @@ import streamlit.components.v1 as components
 import time
 
 # ==========================================
-# 1. 頁面設定與狀態初始化
+# 1. 頁面設定與狀態記憶 (防閃退核心)
 # ==========================================
-st.set_page_config(page_title="Solana 狙擊指揮中心 (穩定版)", layout="wide", page_icon="⚓")
+st.set_page_config(page_title="Solana 狙擊指揮中心 (完全體)", layout="wide", page_icon="🚀")
 
-# 初始化 Session State (這是防止跳頁的關鍵！)
-if 'analyzed_data' not in st.session_state:
-    st.session_state.analyzed_data = None
-if 'current_token' not in st.session_state:
-    st.session_state.current_token = ""
+# 初始化 Session State
+if 'manual_result' not in st.session_state:
+    st.session_state.manual_result = None # 存手動查詢的結果
+if 'auto_results' not in st.session_state:
+    st.session_state.auto_results = []    # 存自動掃描的結果列表
 
 st.sidebar.title("⚙️ 設定中心")
 HELIUS_KEY = st.sidebar.text_input("Helius API Key", type="password")
 RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_KEY}"
 
+# 交易所標籤
 CEX_LABELS = {
     "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1": "Binance 1",
     "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfBKkTY8CJ92pA": "Binance 2",
@@ -30,7 +31,7 @@ CEX_LABELS = {
 }
 
 # ==========================================
-# 2. 核心功能
+# 2. 核心功能：API 請求與分析
 # ==========================================
 def send_rpc(method, params):
     try:
@@ -56,7 +57,7 @@ def trace_funder(wallet):
     return None
 
 def analyze_token(token_address):
-    """執行分析並回傳結果"""
+    """分析單一代幣，回傳 (Graph, RiskScore)"""
     if not HELIUS_KEY: return None, "請輸入 API Key"
     if token_address.startswith("0x"): return None, "不支援以太坊"
 
@@ -82,9 +83,7 @@ def analyze_token(token_address):
     risk_score = 0
     funder_map = {}
     
-    # 這裡我們使用 st.progress 需要小心，因為這是在函數內
-    # 為了簡化，這裡直接跑完
-    
+    # 這裡不顯示進度條，以免自動掃描時洗版
     for whale in unique_whales:
         G.add_node(whale, label=f"Holder\n{whale[:4]}...", color="#97c2fc", size=15)
         G.add_edge(whale, token_address, color="#cccccc")
@@ -105,80 +104,149 @@ def analyze_token(token_address):
     return G, risk_score
 
 # ==========================================
-# 3. 顯示功能 (Rendering)
+# 3. 掃描新幣策略 (Fail-Safe)
 # ==========================================
-def render_analysis_results(token_addr, G, risk):
-    """將分析結果畫在畫面上 (包含圖表、RugCheck、交易按鈕)"""
+def scan_new_pairs():
+    keywords = ["pump", "meme", "cat", "dog", "pepe"]
+    BLACKLIST_ADDR = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
     
-    st.markdown("---")
-    st.subheader(f"📊 分析報告: `{token_addr}`")
+    all_candidates = []
+    try:
+        # 多關鍵字輪詢
+        for kw in keywords:
+            res = requests.get(f"https://api.dexscreener.com/latest/dex/search?q={kw}", timeout=5).json()
+            pairs = res.get('pairs', [])
+            for p in pairs:
+                if p.get('chainId') != 'solana': continue
+                if p.get('baseToken', {}).get('address') in BLACKLIST_ADDR: continue
+                name = p.get('baseToken', {}).get('name', '').lower()
+                if name == 'solana' or name == 'wrapped sol': continue
+                all_candidates.append(p)
+            if len(all_candidates) > 15: break
+        
+        # 按時間排序
+        all_candidates.sort(key=lambda x: x.get('pairCreatedAt', 0), reverse=True)
+        
+        # 去重
+        seen = set()
+        final = []
+        for p in all_candidates:
+            addr = p.get('baseToken', {}).get('address', '')
+            if addr not in seen:
+                seen.add(addr)
+                final.append(p)
+        return final[:5] # 只回傳前5個
+    except: return []
 
-    # 1. 風險提示
+# ==========================================
+# 4. 共用渲染組件 (畫圖+按鈕)
+# ==========================================
+def render_token_card(token_addr, token_name, price, G, risk):
+    """將單個代幣的分析結果畫出來"""
+    st.markdown(f"### {token_name}")
+    st.caption(f"📍 `{token_addr}` | 💰 ${price}")
+
+    # 風險提示
     if risk > 0:
         st.error(f"🚨 發現老鼠倉集團！風險指數: {risk}")
     else:
         st.success("✅ 籌碼結構健康 (無明顯關聯)")
     
-    # 2. 關係圖
-    net = Network(height="450px", width="100%", bgcolor="#222222", font_color="white", directed=True, cdn_resources='in_line')
+    # 畫圖
+    net = Network(height="400px", width="100%", bgcolor="#222222", font_color="white", directed=True, cdn_resources='in_line')
     net.from_nx(G)
-    net.save_graph("graph.html")
-    with open("graph.html", "r", encoding="utf-8") as f:
-        components.html(f.read(), height=470)
+    # 這裡我們用一個隨機檔名避免快取衝突，或直接用 HTML string
+    # 為了簡單，這裡用 unique key
+    html_data = net.generate_html()
+    components.html(html_data, height=420)
     
-    # 3. RugCheck
-    st.subheader("🛡️ 合約安全")
+    # RugCheck (簡單版)
     try:
-        url = f"https://api.rugcheck.xyz/v1/tokens/{token_addr}/report"
-        res = requests.get(url, timeout=5).json()
-        score = res.get('score', 0)
-        if score < 1000: st.success(f"評分: {score} (安全)")
-        else: st.error(f"評分: {score} (危險)")
-    except: st.warning("RugCheck 連線失敗")
+        r_res = requests.get(f"https://api.rugcheck.xyz/v1/tokens/{token_addr}/report", timeout=3).json()
+        score = r_res.get('score', 9999)
+        if score < 1000: st.info(f"🛡️ RugCheck 評分: {score} (安全)")
+        else: st.warning(f"🛡️ RugCheck 評分: {score} (注意)")
+    except: pass
 
-    # 4. Jupiter 交易 (這裡的輸入框不會再導致跳頁了)
-    st.subheader("🔫 快速狙擊")
+    # 交易按鈕 (使用 Unique Key 防止衝突)
     col1, col2 = st.columns([1, 2])
     with col1:
-        # 這裡的 key 很重要，確保每次輸入都是獨立的
-        amount = st.number_input("買入 SOL 數量", min_value=0.1, value=0.5, step=0.1, key=f"amt_{token_addr}")
+        amt = st.number_input("買入 SOL", min_value=0.1, value=0.5, step=0.1, key=f"buy_{token_addr}")
     with col2:
         st.write("")
         st.write("")
-        jup_url = f"https://jup.ag/swap/SOL-{token_addr}?inAmount={amount}"
-        st.markdown(f"""
-        <a href="{jup_url}" target="_blank" style="text-decoration:none;">
-            <button style="background-color:#4CAF50;color:white;padding:10px 20px;border:none;border-radius:10px;cursor:pointer;width:100%;font-size:16px;">
-            🚀 買入 {amount} SOL
-            </button>
-        </a>
-        """, unsafe_allow_html=True)
+        jup_url = f"https://jup.ag/swap/SOL-{token_addr}?inAmount={amt}"
+        st.markdown(f"""<a href="{jup_url}" target="_blank"><button style="background-color:#4CAF50;color:white;padding:8px 16px;border:none;border-radius:8px;cursor:pointer;">🚀 買入 {amt} SOL</button></a>""", unsafe_allow_html=True)
+    
+    st.divider()
 
 # ==========================================
-# 4. 主介面邏輯
+# 5. 主介面邏輯 (雙分頁)
 # ==========================================
-st.title("🚀 Solana 狙擊指揮中心 (穩定版)")
+st.title("🚀 Solana 狙擊指揮中心")
 
 if not HELIUS_KEY:
     st.warning("⚠️ 請先在左側欄位輸入 Helius API Key！")
 
-# 輸入框
-target = st.text_input("輸入代幣地址", "2zMMhcVQhZkJeb4h5Rpp47aZPaej4XMs75c8V4Jkpump")
+tab1, tab2 = st.tabs(["🔍 手動查幣", "🤖 自動掃描市場"])
 
-# 按鈕邏輯：按下去後，把結果存進 session_state
-if st.button("開始分析", key="btn_manual"):
-    with st.spinner("🕵️‍♂️ 正在分析中... (請稍候)"):
-        G, risk = analyze_token(target)
-        if G:
-            # 存檔！這樣刷新也不會不見
-            st.session_state.analyzed_data = {'G': G, 'risk': risk, 'addr': target}
+# --- TAB 1: 手動查詢 ---
+with tab1:
+    target = st.text_input("輸入代幣地址", "2zMMhcVQhZkJeb4h5Rpp47aZPaej4XMs75c8V4Jkpump")
+    
+    # 按鈕觸發分析，並存入 Session
+    if st.button("開始分析", key="btn_manual"):
+        with st.spinner("🕵️‍♂️ 正在分析中..."):
+            G, risk = analyze_token(target)
+            if G:
+                st.session_state.manual_result = {'G': G, 'risk': risk, 'addr': target, 'name': 'Target Token', 'price': '-'}
+            else:
+                st.error(f"分析失敗: {risk}")
+
+    # 渲染手動結果 (如果有存檔)
+    if st.session_state.manual_result:
+        # 確保顯示的是當前輸入框的幣
+        res = st.session_state.manual_result
+        if res['addr'] == target:
+            render_token_card(res['addr'], res['name'], res['price'], res['G'], res['risk'])
+
+# --- TAB 2: 自動掃描 ---
+with tab2:
+    st.write("點擊按鈕，自動抓取市場上最新的 5 個熱門新幣並進行老鼠倉檢測。")
+    
+    # 按鈕觸發掃描，並存入 Session
+    if st.button("🛡️ 啟動自動掃描", key="btn_auto"):
+        if not HELIUS_KEY:
+             st.error("無 Key")
         else:
-            st.error(f"分析失敗: {risk}")
+            with st.spinner("🛰️ 正在掃描 DexScreener 並分析大戶數據 (需約 30 秒)..."):
+                pairs = scan_new_pairs()
+                results_buffer = []
+                
+                if not pairs:
+                    st.warning("暫無新幣數據")
+                else:
+                    progress_bar = st.progress(0)
+                    for i, pair in enumerate(pairs):
+                        name = pair.get('baseToken', {}).get('name', 'Unknown')
+                        addr = pair.get('baseToken', {}).get('address', '')
+                        price = pair.get('priceUsd', '0')
+                        
+                        # 分析
+                        G, risk = analyze_token(addr)
+                        if G:
+                            results_buffer.append({
+                                'addr': addr, 'name': name, 'price': price, 'G': G, 'risk': risk
+                            })
+                        
+                        progress_bar.progress((i + 1) / len(pairs))
+                    
+                    # 存入 Session
+                    st.session_state.auto_results = results_buffer
+                    progress_bar.empty()
 
-# 渲染邏輯：只要 session_state 裡面有資料，就畫出來
-# 這樣不管你下面怎麼調金額，這裡都會持續顯示
-if st.session_state.analyzed_data:
-    data = st.session_state.analyzed_data
-    # 只有當目前輸入框的地址跟分析結果一樣時才顯示 (避免誤會)
-    if data['addr'] == target:
-        render_analysis_results(data['addr'], data['G'], data['risk'])
+    # 渲染自動掃描結果 (如果有存檔)
+    if st.session_state.auto_results:
+        st.success(f"✅ 掃描完成！共找到 {len(st.session_state.auto_results)} 個有效代幣")
+        for res in st.session_state.auto_results:
+            render_token_card(res['addr'], res['name'], res['price'], res['G'], res['risk'])
